@@ -9,6 +9,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.5/JsBarcode.all.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
       * {
         margin: 0;
@@ -19,9 +20,6 @@
         font-family: Arial, sans-serif;
         background: #f5f5f5;
       }
-      input {
-        font-family: Arial, sans-serif;
-      }
       .input {
         border: 1px solid #d1d5db;
         border-radius: 4px;
@@ -29,6 +27,7 @@
         font-size: 13px;
         width: 100%;
         outline: none;
+        font-family: Arial, sans-serif;
       }
       .input:focus {
         border-color: #3b82f6;
@@ -40,64 +39,72 @@
     <script type="text/babel">
       const { useState, useRef, useCallback } = React;
 
-      function normalizeHeader(h) {
-        return h
+      function normalizeKey(s) {
+        return (s || "")
           .normalize("NFD")
           .replace(/[\u0300-\u036f]/g, "")
           .toLowerCase()
-          .trim();
+          .trim()
+          .replace(/\s+/g, " ");
       }
 
-      function parseLatin1(buffer) {
-        const bytes = new Uint8Array(buffer);
-        return Array.from(bytes)
-          .map((b) => String.fromCharCode(b))
-          .join("");
-      }
+      function parseXLSX(buffer) {
+        const wb = XLSX.read(buffer, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-      function parseCSV(text) {
-        const allLines = text.split(/\r?\n/);
-        let headerIdx = -1;
-        for (let i = 0; i < allLines.length; i++) {
-          const norm = normalizeHeader(allLines[i]);
-          if (norm.includes("tipo") && norm.includes("nombre")) {
-            headerIdx = i;
-            break;
+        // Normalize keys
+        const rows = raw.map((r) => {
+          const out = {};
+          for (const k of Object.keys(r)) out[normalizeKey(k)] = r[k];
+          return out;
+        });
+
+        const result = [];
+        for (const r of rows) {
+          const skuPadre = String(r["sku padre"] || "").trim();
+          const sku = String(r["sku"] || "").trim();
+          const nombre = String(r["nombre"] || "").trim();
+          const tipo = String(r["tipo"] || "")
+            .trim()
+            .toLowerCase();
+
+          // Skip parent products (no SKU padre) and non-products
+          if (!skuPadre) continue;
+          if (!sku) continue;
+
+          // Extract color and talle from attribute columns
+          let talle = "",
+            color = "";
+          const a1 = normalizeKey(String(r["atributo 1"] || ""));
+          const v1 = String(r["variante de atributo 1"] || "").trim();
+          const a2 = normalizeKey(String(r["atributo 2"] || ""));
+          const v2 = String(r["variante de atributo 2"] || "").trim();
+
+          if (a1 === "talle") {
+            talle = v1;
+          } else if (a1 === "color") {
+            color = v1;
           }
-        }
-        if (headerIdx === -1) return [];
+          if (a2 === "talle") {
+            talle = v2;
+          } else if (a2 === "color") {
+            color = v2;
+          }
 
-        const headers = allLines[headerIdx].split(";").map(normalizeHeader);
-        const idx = (name) =>
-          headers.findIndex(
-            (h) =>
-              h === normalizeHeader(name) || h.includes(normalizeHeader(name)),
-          );
-        const iNombre = idx("nombre");
-        const iCodigo = idx("codigo de barras");
-        const iTipo = idx("tipo");
-        const iInventariable = idx("item inventariable");
+          // Use SKU padre as the product base name, fallback to nombre
+          const productoBase = String(r["sku padre"] || nombre).trim();
 
-        const rows = [];
-        for (let i = headerIdx + 1; i < allLines.length; i++) {
-          const line = allLines[i];
-          if (!line.trim()) continue;
-          const cols = line.split(";");
-          if ((cols[iTipo] || "").trim() === "Servicio") continue;
-          if ((cols[iInventariable] || "").trim() === "No") continue;
-          const nombre = (cols[iNombre] || "").trim();
-          const codigo = (cols[iCodigo] || "").trim();
-          if (!nombre && !codigo) continue;
-          const parts = nombre.split("/").map((p) => p.trim());
-          rows.push({
+          result.push({
             id: crypto.randomUUID(),
-            nombre: parts[0] || "",
-            codigo,
-            talle: parts[2] || "",
-            color: parts[1] || "",
+            nombre: skuPadre,
+            codigo: sku,
+            talle,
+            color,
+            nombreCompleto: nombre,
           });
         }
-        return rows;
+        return result;
       }
 
       async function generateBarcodeDataURL(code) {
@@ -120,16 +127,19 @@
         const [status, setStatus] = useState("");
         const fileRef = useRef(null);
 
-        const handleCSV = useCallback(async (e) => {
+        const handleFile = useCallback(async (e) => {
           const file = e.target.files[0];
           if (!file) return;
-          setStatus("Leyendo CSV...");
-          const buffer = await file.arrayBuffer();
-          const text = parseLatin1(buffer);
-          const parsed = parseCSV(text);
-          setRows(parsed);
-          setLabels([]);
-          setStatus(`${parsed.length} productos importados.`);
+          setStatus("Leyendo archivo...");
+          try {
+            const buffer = await file.arrayBuffer();
+            const parsed = parseXLSX(buffer);
+            setRows(parsed);
+            setLabels([]);
+            setStatus(`✅ ${parsed.length} variantes importadas.`);
+          } catch (err) {
+            setStatus("❌ Error leyendo archivo: " + err.message);
+          }
           e.target.value = "";
         }, []);
 
@@ -142,6 +152,7 @@
               codigo: "",
               talle: "",
               color: "",
+              nombreCompleto: "",
             },
           ]);
         const removeRow = (id) => setRows((r) => r.filter((x) => x.id !== id));
@@ -165,7 +176,7 @@
               }
             }
             setLabels(result);
-            setStatus(`${result.length} etiquetas generadas.`);
+            setStatus(`✅ ${result.length} etiquetas generadas.`);
           } finally {
             setLoading(false);
           }
@@ -181,8 +192,8 @@
               LH = 22;
             const marginX = 10,
               marginY = 10;
-            const cols = Math.floor((210 - marginX * 2) / LW);
-            const rowsPerPage = Math.floor((297 - marginY * 2) / LH);
+            const cols = Math.floor((210 - marginX * 2) / LW); // 4
+            const rowsPerPage = Math.floor((297 - marginY * 2) / LH); // 12
             const doc = new jsPDF({ unit: "mm", format: "a4" });
 
             labels.forEach((l, i) => {
@@ -192,24 +203,35 @@
               const x = marginX + col * LW;
               const y = marginY + row * LH;
 
+              // Border
               doc.setDrawColor(180);
               doc.setLineWidth(0.2);
               doc.rect(x, y, LW, LH);
+
+              // Brand
               doc.setFont("helvetica", "bold");
               doc.setFontSize(6);
               doc.setTextColor(0);
               doc.text("MOONLAND", x + LW / 2, y + 3.5, { align: "center" });
+
+              // Nombre base (SKU padre)
               doc.setFont("helvetica", "normal");
               doc.setFontSize(5.5);
               const nombreTrunc =
-                l.nombre.length > 22 ? l.nombre.slice(0, 22) + "…" : l.nombre;
+                l.nombre.length > 20 ? l.nombre.slice(0, 20) + "…" : l.nombre;
               doc.text(nombreTrunc, x + LW / 2, y + 7, { align: "center" });
+
+              // Variante
               const variante = [l.color, l.talle].filter(Boolean).join(" · ");
               doc.setFontSize(4.5);
               doc.setTextColor(80);
               doc.text(variante, x + LW / 2, y + 10, { align: "center" });
+
+              // Barcode
               if (l.dataUrl)
                 doc.addImage(l.dataUrl, "PNG", x + 2, y + 11, LW - 4, 8);
+
+              // Código
               doc.setFontSize(4);
               doc.setTextColor(100);
               doc.text(l.codigo, x + LW / 2, y + 20.5, { align: "center" });
@@ -218,17 +240,36 @@
             doc.save("etiquetas-moonland.pdf");
             setStatus("✅ PDF descargado.");
           } catch (err) {
-            setStatus("Error: " + err.message);
+            setStatus("❌ Error: " + err.message);
           } finally {
             setExporting(false);
           }
         };
 
+        const btn = (onClick, disabled, bg, children) => (
+          <button
+            onClick={onClick}
+            disabled={disabled}
+            style={{
+              background: disabled ? "#555" : bg,
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              padding: "8px 16px",
+              cursor: disabled ? "not-allowed" : "pointer",
+              fontSize: 13,
+            }}
+          >
+            {children}
+          </button>
+        );
+
         return (
           <div
             style={{ minHeight: "100vh", background: "#f5f5f5", padding: 24 }}
           >
-            <div style={{ maxWidth: 900, margin: "0 auto" }}>
+            <div style={{ maxWidth: 960, margin: "0 auto" }}>
+              {/* Header */}
               <div
                 style={{
                   background: "#111",
@@ -266,48 +307,31 @@
                       fontSize: 13,
                     }}
                   >
-                    📂 Importar CSV
+                    📂 Importar XLSX
                   </button>
                   <input
                     ref={fileRef}
                     type="file"
-                    accept=".csv"
+                    accept=".xlsx,.xls"
                     style={{ display: "none" }}
-                    onChange={handleCSV}
+                    onChange={handleFile}
                   />
-                  <button
-                    onClick={generateLabels}
-                    disabled={loading || !rows.length}
-                    style={{
-                      background: rows.length ? "#2563eb" : "#555",
-                      color: "white",
-                      border: "none",
-                      borderRadius: 6,
-                      padding: "8px 16px",
-                      cursor: rows.length ? "pointer" : "not-allowed",
-                      fontSize: 13,
-                    }}
-                  >
-                    {loading ? "Generando..." : "⚡ Generar etiquetas"}
-                  </button>
-                  <button
-                    onClick={exportPDF}
-                    disabled={exporting || !labels.length}
-                    style={{
-                      background: labels.length ? "#16a34a" : "#555",
-                      color: "white",
-                      border: "none",
-                      borderRadius: 6,
-                      padding: "8px 16px",
-                      cursor: labels.length ? "pointer" : "not-allowed",
-                      fontSize: 13,
-                    }}
-                  >
-                    {exporting ? "Exportando..." : "📄 Descargar PDF"}
-                  </button>
+                  {btn(
+                    generateLabels,
+                    loading || !rows.length,
+                    "#2563eb",
+                    loading ? "Generando..." : "⚡ Generar etiquetas",
+                  )}
+                  {btn(
+                    exportPDF,
+                    exporting || !labels.length,
+                    "#16a34a",
+                    exporting ? "Exportando..." : "📄 Descargar PDF",
+                  )}
                 </div>
               </div>
 
+              {/* Status */}
               {status && (
                 <div
                   style={{
@@ -324,6 +348,7 @@
                 </div>
               )}
 
+              {/* Tabla */}
               <div
                 style={{
                   background: "white",
@@ -371,8 +396,8 @@
                     <thead>
                       <tr style={{ background: "#f9fafb" }}>
                         {[
-                          "Nombre",
-                          "Código de barras",
+                          "Producto (SKU Padre)",
+                          "Código (SKU)",
                           "Color",
                           "Talle",
                           "",
@@ -403,7 +428,7 @@
                               color: "#9ca3af",
                             }}
                           >
-                            Importá un CSV o agregá filas manualmente
+                            Importá un XLSX o agregá filas manualmente
                           </td>
                         </tr>
                       )}
@@ -471,6 +496,7 @@
                 </div>
               </div>
 
+              {/* Preview */}
               {labels.length > 0 && (
                 <div
                   style={{

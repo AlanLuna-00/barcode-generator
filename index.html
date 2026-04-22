@@ -55,6 +55,14 @@
           .join("");
       }
 
+      function stripOuterCsvQuotes(s) {
+        const t = (s || "").trim();
+        if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+          return t.slice(1, -1).replace(/""/g, '"');
+        }
+        return t;
+      }
+
       function parseCSV(text) {
         const allLines = text.split(/\r?\n/);
         let headerIdx = -1;
@@ -85,8 +93,8 @@
           const cols = line.split(";");
           if ((cols[iTipo] || "").trim() === "Servicio") continue;
           if ((cols[iInventariable] || "").trim() === "No") continue;
-          const nombre = (cols[iNombre] || "").trim();
-          const codigo = (cols[iCodigo] || "").trim();
+          const nombre = stripOuterCsvQuotes(cols[iNombre] || "");
+          const codigo = stripOuterCsvQuotes(cols[iCodigo] || "");
           if (!nombre && !codigo) continue;
           const parts = nombre.split("/").map((p) => p.trim());
           rows.push({
